@@ -8,11 +8,17 @@ import {
 import {
   AudioContext,
   AudioContextUnsupportedError,
+  Blob,
+  BlobUnsupportedError,
+  createObjectURL,
+  createObjectURLUnsupportedError,
   enumerateDevices,
   EnumerateDevicesUnsupportedError,
   getDefaultDevices,
   getUserMedia,
   GetUserMediaUnsupportedError,
+  MediaRecorder,
+  MediaRecorderUnsupportedError,
 } from './polyfills';
 import { SubsetRequired, TimeMeasurement } from './types';
 import { detectSilence } from './utils';
@@ -116,13 +122,20 @@ export class InputTest extends EventEmitter {
    */
   private static defaultOptions: InputTest.InternalOptions = {
     audioContextFactory: AudioContext,
+    blobFactory: Blob,
+    createObjectURL,
     debug: false,
     duration: Infinity,
     enumerateDevices,
     getUserMedia,
+    mediaRecorderFactory: MediaRecorder,
     volumeEventIntervalMs: 100,
   };
 
+  /**
+   * List of audio `blob` objects saved by the test.
+   */
+  private _audioBlobs: Blob[] = [];
   /**
    * An `AudioContext` to use for generating volume levels.
    */
@@ -151,6 +164,10 @@ export class InputTest extends EventEmitter {
    * The maximum volume level from the audio source.
    */
   private _maxValue: number = 0;
+  /**
+   * A `MediaRecorder` that is used to save captured audio.
+   */
+  private _mediaRecorder: MediaRecorder | null = null;
   /**
    * A `MediaStream` that is created from the input device.
    */
@@ -194,13 +211,24 @@ export class InputTest extends EventEmitter {
    * override the result from determining whether audio is silent from the collected volume levels.
    */
   stop(pass: boolean = true): InputTest.Report | undefined {
-    if (this._endTime) {
+    if (typeof this._endTime === 'number') {
       this._onWarning(new AlreadyStoppedError());
       return;
     }
 
     // Perform cleanup
     this._cleanup();
+
+    const recordingUrl: string | undefined =
+      this._audioBlobs.length &&
+      this._options.createObjectURL &&
+      this._options.blobFactory
+        ? this._options.createObjectURL(new this._options.blobFactory(
+            this._audioBlobs, {
+              type: this._audioBlobs[0].type,
+            }),
+          )
+        : undefined;
 
     this._endTime = Date.now();
     const didPass: boolean = pass && !detectSilence(this._values);
@@ -213,6 +241,7 @@ export class InputTest extends EventEmitter {
       errors: this._errors,
       testName: InputTest.testName,
       values: this._values,
+      ...recordingUrl && { recordingUrl },
     };
 
     if (this._startTime) {
@@ -240,6 +269,7 @@ export class InputTest extends EventEmitter {
     if (this._cleanupAudio) {
       this._cleanupAudio();
     }
+    this._mediaRecorder?.stop();
     if (this._mediaStream) {
       this._mediaStream.getTracks().forEach(
         (track: MediaStreamTrack) => track.stop(),
@@ -323,6 +353,28 @@ export class InputTest extends EventEmitter {
         await this._options.enumerateDevices(),
       );
 
+      if (this._options.recordAudio) {
+        if (!this._options.mediaRecorderFactory) {
+          throw MediaRecorderUnsupportedError;
+        }
+        if (!this._options.createObjectURL) {
+          throw createObjectURLUnsupportedError;
+        }
+        if (!this._options.blobFactory) {
+          throw BlobUnsupportedError;
+        }
+        this._mediaRecorder =
+          new this._options.mediaRecorderFactory(this._mediaStream);
+        const recordData = ({ data }: BlobEvent) => {
+          this._audioBlobs.push(data);
+        };
+        this._mediaRecorder.addEventListener('dataavailable', recordData);
+        this._mediaRecorder.addEventListener('stop', () => {
+          this._mediaRecorder?.removeEventListener('dataavailable', recordData);
+        });
+        this._mediaRecorder.start(this._options.volumeEventIntervalMs);
+      }
+
       // Only starts the timer after successfully getting devices
       this._startTime = Date.now();
 
@@ -350,7 +402,7 @@ export class InputTest extends EventEmitter {
       // This function runs every `this._options.reportRate` ms and emits the
       // current volume of the `MediaStream`.
       const volumeEvent: () => void = (): void => {
-        if (this._endTime) {
+        if (typeof this._endTime === 'number') {
           return;
         }
 
@@ -436,6 +488,11 @@ export namespace InputTest {
     errors: DiagnosticError[];
 
     /**
+     * The `blob` object URL containing the audio recorded by the test.
+     */
+    recordingUrl?: string;
+
+    /**
      * The name of the test.
      */
     testName: typeof InputTest.testName;
@@ -462,6 +519,18 @@ export namespace InputTest {
     audioContextFactory?: typeof window.AudioContext;
 
     /**
+     * Used to mock the call to `Blob`.
+     * @private
+     */
+    blobFactory?: typeof window.Blob;
+
+    /**
+     * Used to mock the call to `URL.createObjectPolyfill`.
+     * @private
+     */
+    createObjectURL?: typeof window.URL.createObjectURL;
+
+    /**
      * Whether or not to log debug statements to the console.
      * @private
      */
@@ -482,13 +551,26 @@ export namespace InputTest {
      * Used to mock the call to `enumerateDevices`.
      * @private
      */
-    enumerateDevices?: typeof navigator.mediaDevices.enumerateDevices;
+    enumerateDevices?: typeof window.navigator.mediaDevices.enumerateDevices;
 
     /**
      * Used to mock calls to `getUserMedia`.
      * @private
      */
     getUserMedia?: typeof window.navigator.mediaDevices.getUserMedia;
+
+    /**
+     * Used to mock `MediaRecorder`.
+     * @private
+     */
+    mediaRecorderFactory?: typeof window.MediaRecorder;
+
+    /**
+     * Whether or not to record user audio. If `true`, an "Object URL" is
+     * emitted within the report that links to a `blob` that contains the
+     * audio captured during the test.
+     */
+    recordAudio?: boolean;
 
     /**
      * The interval between emissions of volume events in milliseconds.

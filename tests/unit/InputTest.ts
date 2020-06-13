@@ -1,176 +1,322 @@
 // tslint:disable only-arrow-functions
 
 import * as assert from 'assert';
+import * as sinon from 'sinon';
 import { DiagnosticError } from '../../lib/errors';
 import {
   InputTest,
   testInputDevice,
 } from '../../lib/InputTest';
 import { mockAudioContextFactory } from '../mocks/MockAudioContext';
+import { mockBlobFactory } from '../mocks/MockBlob';
 import { mockEnumerateDevicesFactory } from '../mocks/mockEnumerateDevices';
 import { mockGetUserMediaFactory } from '../mocks/mockGetUserMedia';
+import { mockMediaRecorderFactory } from '../mocks/MockMediaRecorder';
 import { MockMediaStream } from '../mocks/MockMediaStream';
 import { MockTrack } from '../mocks/MockTrack';
 
-const defaultDuration = 100;
-const defaultVolumeEventIntervalMs = 10;
-
-const getUserMedia = mockGetUserMediaFactory({
-  mediaStream: new MockMediaStream({
-    tracks: [new MockTrack()],
-  }),
-}) as any;
+function createTestOptions(
+  overrides: Partial<InputTest.Options> = {},
+): InputTest.Options {
+  return {
+    audioContextFactory: mockAudioContextFactory() as any,
+    blobFactory: mockBlobFactory() as any,
+    createObjectURL: sinon.stub().returns('foo'),
+    duration: 1000,
+    enumerateDevices: mockEnumerateDevicesFactory({
+      devices: [{ deviceId: 'default', kind: 'audioinput' } as any],
+    }),
+    getUserMedia: mockGetUserMediaFactory({
+      mediaStream: new MockMediaStream({
+        tracks: [new MockTrack()],
+      }),
+    }) as any,
+    mediaRecorderFactory: mockMediaRecorderFactory() as any,
+    volumeEventIntervalMs: 100,
+    ...overrides,
+  };
+}
 
 describe('testInputDevice', function() {
-  describe('when the volume values are all 100', function() {
-    let report: InputTest.Report;
-    let test: InputTest;
+  let clock: sinon.SinonFakeTimers;
 
-    before(async function() {
-      report = await new Promise(resolve => {
-        test = testInputDevice({
-          audioContextFactory: mockAudioContextFactory({
-            analyserNodeOptions: { volumeValues: 100 },
-          }) as any,
-          duration: defaultDuration,
-          enumerateDevices: mockEnumerateDevicesFactory({
-            devices: [{ deviceId: 'default', kind: 'audioinput' } as any],
-          }),
-          getUserMedia,
-          volumeEventIntervalMs: defaultVolumeEventIntervalMs,
-        });
-        test.on(InputTest.Events.End, (r) => resolve(r));
-      });
-    });
-
-    it('should have passed', function() {
-      assert(report.didPass);
-    });
+  before(function() {
+    clock = sinon.useFakeTimers();
   });
 
-  describe('when the volume values are all 0', function() {
-    let report: InputTest.Report;
+  after(function() {
+    sinon.restore();
+  });
 
-    before(async function() {
-      report = await new Promise(resolve => {
-        testInputDevice({
+  async function runBasicTest(
+    testOptions: InputTest.Options,
+  ) {
+    const errorHandler: sinon.SinonStub = sinon.stub();
+    const volumeHandler: sinon.SinonStub = sinon.stub();
+    const endHandler: sinon.SinonStub = sinon.stub();
+
+    const inputTest = testInputDevice(testOptions);
+    inputTest.on(InputTest.Events.Error, errorHandler);
+    inputTest.on(InputTest.Events.Volume, volumeHandler);
+    inputTest.on(InputTest.Events.End, endHandler);
+
+    await clock.runAllAsync();
+
+    return {
+      endHandler,
+      errorHandler,
+      inputTest,
+      volumeHandler,
+    };
+  }
+
+  describe('in a supported environment', function() {
+    describe('when all volume values are all 0', function() {
+      let errorHandler: sinon.SinonStub;
+      let volumeHandler: sinon.SinonStub;
+      let endHandler: sinon.SinonStub;
+
+      before(async function() {
+        const options = createTestOptions({
           audioContextFactory: mockAudioContextFactory({
             analyserNodeOptions: { volumeValues: 0 },
           }) as any,
-          duration: defaultDuration,
-          enumerateDevices: mockEnumerateDevicesFactory({
-            devices: [{ deviceId: 'default', kind: 'audioinput' } as any],
-          }),
-          getUserMedia,
-          volumeEventIntervalMs: defaultVolumeEventIntervalMs,
-        }).on(InputTest.Events.End, (r) => resolve(r));
+        });
+        const handlers = await runBasicTest(options);
+        endHandler = handlers.endHandler;
+        errorHandler = handlers.errorHandler;
+        volumeHandler = handlers.volumeHandler;
+      });
+
+      it('should not have emitted any error event', function() {
+        assert(errorHandler.notCalled);
+      });
+
+      it('should have emitted at least one volume event', function() {
+        assert(volumeHandler.called);
+      });
+
+      it('should generate a valid report', function() {
+        assert(endHandler.calledOnce);
+        const report: InputTest.Report = endHandler.args[0][0];
+        assert(report);
+        assert(!report.didPass);
+        assert.equal(report.values.length, volumeHandler.callCount);
+        assert(report.values.every(v => v === 0));
       });
     });
 
-    it('should have not passed', function() {
-      assert.equal(report.didPass, false);
+    describe('when all volume values are all 100', function() {
+      let errorHandler: sinon.SinonStub;
+      let volumeHandler: sinon.SinonStub;
+      let endHandler: sinon.SinonStub;
+
+      before(async function() {
+        const options = createTestOptions({
+          audioContextFactory: mockAudioContextFactory({
+            analyserNodeOptions: { volumeValues: 100 },
+          }) as any,
+        });
+        const handlers = await runBasicTest(options);
+        endHandler = handlers.endHandler;
+        errorHandler = handlers.errorHandler;
+        volumeHandler = handlers.volumeHandler;
+      });
+
+      it('should not have emitted any error event', function() {
+        assert(errorHandler.notCalled);
+      });
+
+      it('should have emitted at least one volume event', function() {
+        assert(volumeHandler.called);
+      });
+
+      it('should generate a valid report', function() {
+        assert(endHandler.calledOnce);
+        const report: InputTest.Report = endHandler.args[0][0];
+        assert(report);
+        assert(report.didPass);
+        assert.equal(report.values.length, volumeHandler.callCount);
+        assert(report.values.every(v => v === 100));
+      });
+    });
+
+    describe('when recording audio', function() {
+      let errorHandler: sinon.SinonStub;
+      let volumeHandler: sinon.SinonStub;
+      let endHandler: sinon.SinonStub;
+      let inputTest: InputTest;
+
+      before(async function() {
+        const options = createTestOptions({
+          recordAudio: true,
+        });
+        const test = await runBasicTest(options);
+        endHandler = test.endHandler;
+        errorHandler = test.errorHandler;
+        volumeHandler = test.volumeHandler;
+        inputTest = test.inputTest;
+      });
+
+      it('should have captured audio blobs', function() {
+        assert(inputTest['_audioBlobs']?.length);
+      });
     });
   });
 
-  describe('should immediately end and report an error', function() {
-    // not providing the mock object here results in the test resorting to the
-    // global
-    // because these are unit tests, and node does not have these globals,
-    // they are null and are essentially "not supported"
+  describe('in an unsupported environment', function() {
+    describe('it should immediately end and report an error', function() {
+      ([ [
+        'AudioContext', createTestOptions({ audioContextFactory: undefined }),
+      ], [
+        'getUserMedia', createTestOptions({ getUserMedia: undefined }),
+      ], [
+        'createObjectURL', createTestOptions({ createObjectURL: undefined, recordAudio: true }),
+      ], [
+        'enumerateDevices', createTestOptions({ enumerateDevices: undefined }),
+      ], [
+        'mediaRecorder', createTestOptions({ mediaRecorderFactory: undefined, recordAudio: true }),
+      ], [
+        'Blob', createTestOptions({ blobFactory: undefined, recordAudio: true }),
+      ] ] as const).forEach(([title, options]) => {
+        it(`when ${title} is not supported`, async function() {
+          const handlers = await runBasicTest(options);
+          const endHandler = handlers.endHandler;
+          const errorHandler = handlers.errorHandler;
+          const volumeHandler = handlers.volumeHandler;
 
-    it('when AudioContext is not supported', async function() {
-      const report: InputTest.Report = await new Promise(resolve => {
-        const test = testInputDevice({
-          enumerateDevices: mockEnumerateDevicesFactory({
-            devices: [{ deviceId: 'default', kind: 'audioinput' } as any],
-          }),
-          getUserMedia,
+          assert(endHandler.calledOnce);
+          const report: InputTest.Report = endHandler.args[0][0];
+          assert(report);
+          assert(!report.didPass);
+          assert(errorHandler.calledOnce);
+          assert(errorHandler.calledBefore(endHandler));
+          assert(volumeHandler.notCalled);
         });
-        test.on(InputTest.Events.Error, () => {
-          // do nothing, prevent rejection
-        });
-        test.on(InputTest.Events.End, (r) => resolve(r));
       });
-      assert(report);
-      assert.equal(report.didPass, false);
-      assert.equal(report.errors.length, 1);
-      const [error] = report.errors;
-      assert(error instanceof DiagnosticError);
-      assert.equal(error.name, 'UnsupportedError');
-    });
-    it('when getUserMedia is not supported', async function() {
-      const report: InputTest.Report = await new Promise(resolve => {
-        const test = testInputDevice({
-          audioContextFactory: mockAudioContextFactory() as any,
-          enumerateDevices: mockEnumerateDevicesFactory({
-            devices: [{ deviceId: 'default', kind: 'audioinput' } as any],
-          }),
-        });
-        test.on(InputTest.Events.Error, () => {
-          // do nothing, prevent rejection
-        });
-        test.on(InputTest.Events.End, (r) => resolve(r));
-      });
-      assert(report);
-      assert.equal(report.didPass, false);
-      assert.equal(report.errors.length, 1);
-      const [error] = report.errors;
-      assert(error instanceof DiagnosticError);
-      assert.equal(error.name, 'UnsupportedError');
-    });
-    it('when neither AudioContext or getUserMedia is supported', async function() {
-      const report: InputTest.Report = await new Promise(resolve => {
-        const test = testInputDevice({
-          enumerateDevices: mockEnumerateDevicesFactory({
-            devices: [{ deviceId: 'default', kind: 'audioinput' } as any],
-          }),
-        });
-        test.on(InputTest.Events.Error, () => {
-          // do nothing, prevent rejection
-        });
-        test.on(InputTest.Events.End, (r) => resolve(r));
-      });
-      assert(report);
-      assert.equal(report.didPass, false);
-      assert.equal(report.errors.length, 1);
-      const [error] = report.errors;
-      assert(error instanceof DiagnosticError);
-      assert.equal(error.name, 'UnsupportedError');
     });
   });
 
-  it('should do nothing if stopped multiple times', function() {
-    const test = testInputDevice({
-      audioContextFactory: mockAudioContextFactory({
-        analyserNodeOptions: { volumeValues: 100 },
-      }) as any,
-      debug: false, // prevent console warnings
-      enumerateDevices: mockEnumerateDevicesFactory({
-        devices: [{ deviceId: 'default', kind: 'audioinput' } as any],
-      }),
-      getUserMedia,
-    });
-    const report = test.stop();
-    assert(report);
-    const shouldBeUndefined = test.stop();
-    assert.equal(shouldBeUndefined, undefined);
+  it('should throw if passed invalid options', async function() {
+    const invalidOptions = [{
+      deviceId: 0,
+    }, {
+      deviceId: {},
+    }, {
+      duration: -10,
+    }, {
+      duration: {},
+    }, {
+      volumeEventIntervalMs: -10,
+    }, {
+      volumeEventIntervalMs: {},
+    }] as any;
+
+    for (const overrides of invalidOptions) {
+      const options = createTestOptions(overrides);
+      const {
+        endHandler,
+        errorHandler,
+        volumeHandler,
+      } = await runBasicTest(options);
+      assert(endHandler.calledOnce);
+      assert(errorHandler.calledOnce);
+      assert(endHandler.calledAfter(errorHandler));
+      assert(volumeHandler.notCalled);
+    }
   });
 
-  it('should report errors if the audio context throws', async function() {
-    await assert.rejects(() => new Promise((_, reject) => {
-      const test = testInputDevice({
+  it('should warn if stopped multiple times', async function() {
+    const consoleStub = sinon.stub(console, 'warn');
+    try {
+      const options = createTestOptions({ debug: true });
+      const test = testInputDevice(options);
+      const report = test.stop();
+      assert(report);
+      const shouldBeUndefined = test.stop();
+      assert.equal(shouldBeUndefined, undefined);
+      assert(consoleStub.calledOnce);
+    } finally {
+      await clock.runAllAsync();
+      consoleStub.restore();
+    }
+  });
+
+  describe('should handle when an error is thrown during the test', function() {
+    ([ [
+      'AudioContext', createTestOptions({
         audioContextFactory: mockAudioContextFactory({
-          analyserNodeOptions: { volumeValues: 100 },
-          throw: { createAnalyser: new DiagnosticError() },
+          throw: { construction: new DiagnosticError() },
         }) as any,
-        duration: defaultDuration,
+      }),
+    ], [
+      'getUserMedia', createTestOptions({
+        getUserMedia: mockGetUserMediaFactory({
+          throw: new DiagnosticError(),
+        }) as any,
+      }),
+    ], [
+      'enumerateDevices', createTestOptions({
         enumerateDevices: mockEnumerateDevicesFactory({
-          devices: [{ deviceId: 'default', kind: 'audioinput' } as any],
-        }),
-        getUserMedia,
-        volumeEventIntervalMs: defaultVolumeEventIntervalMs,
+          devices: [],
+          throw: new DiagnosticError(),
+        }) as any,
+      }),
+    ], [
+      'MediaRecorder', createTestOptions({
+        mediaRecorderFactory: mockMediaRecorderFactory({
+          throw: { construction: new DiagnosticError() },
+        }) as any,
+        recordAudio: true,
+      }),
+    ] ] as const).forEach(([title, options]) => {
+      it(`by ${title}`, async function() {
+        const {
+          endHandler,
+          errorHandler,
+          volumeHandler,
+        } = await runBasicTest(options);
+        assert(endHandler.calledOnce);
+        const report: InputTest.Report = endHandler.args[0][0];
+        assert(report);
+        assert(!report.didPass);
+        assert(errorHandler.calledOnce);
+        assert(errorHandler.calledBefore(endHandler));
+        assert(volumeHandler.notCalled);
       });
-      test.on(InputTest.Events.Error, e => reject(e));
-    }));
+    });
+
+    ([ [
+      'DiagnosticError', new DiagnosticError(),
+    ], [
+      'DOMException', new (global as any).DOMException(),
+    ], [
+      'DOMError', new (global as any).DOMError(),
+    ], [
+      'unknown error', new Error(),
+    ] ] as const).forEach(([title, error]) => {
+      it(`of type ${title}`, async function() {
+        const options = createTestOptions({
+          audioContextFactory: mockAudioContextFactory({
+            throw: { construction: error },
+          }) as any,
+        });
+        const {
+          endHandler,
+          errorHandler,
+          volumeHandler,
+        } = await runBasicTest(options);
+        assert(endHandler.calledOnce);
+        assert(errorHandler.calledOnce);
+        assert(endHandler.calledAfter(errorHandler));
+        assert(volumeHandler.notCalled);
+
+        const handledError = errorHandler.args[0][0];
+        const report: InputTest.Report = endHandler.args[0][0];
+        assert(!report.didPass);
+        assert.equal(report.errors.length, 1);
+        assert.equal(handledError, report.errors[0]);
+      });
+    });
   });
 });
