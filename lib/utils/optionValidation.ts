@@ -187,6 +187,19 @@ export function validateExists(option: any): Validity {
 
 /**
  * @internalapi
+ * Validate that an option is a `boolean`.
+ * @param option The option to check.
+ * @returns A possibly undefined string, if the option is valid it will return
+ * `undefined`, otherwise a string representing why the option is invalid
+ */
+export function validateBoolean(option: any): Validity {
+  if (typeof option !== 'boolean') {
+    return `Option must be "boolean".`;
+  }
+}
+
+/**
+ * @internalapi
  * Validate input options to the [[InputTest]].
  * @param inputOptions The options to validate.
  * @param config A record of option names to either a single
